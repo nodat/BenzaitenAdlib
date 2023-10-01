@@ -8,14 +8,14 @@ def learn_and_generate_model(x, y, model_idf):
     output_dim = y.shape[2]  # 出力データにおける各時刻のベクトルの次元数
 
     # generateフェーズ用に数値を保存
-    config_file = open("%s.benzaitenconfig" % model_idf, 'w')
+    config_file = open(bc.MODEL_DIR + "%s.benzaitenconfig" % model_idf, 'w')
     config_file.write("%s\n%s\n%s" % (seq_length, input_dim, output_dim))
     config_file.close()
 
     # VAEモデル作成
     main_vae = bc.make_model(seq_length, input_dim, output_dim)
-    main_vae.fit(x, y, epochs=500)
-    main_vae.save(bc.BASE_DIR + "/mymodel_%s.h5" % model_idf)
+    main_vae.fit(x, y, epochs=300)
+    main_vae.save(bc.MODEL_DIR + "mymodel_%s.h5" % model_idf)
 
 
 # 学習用MusicXMLを読み込んでモデルを生成

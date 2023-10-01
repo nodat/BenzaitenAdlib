@@ -3,16 +3,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import mido
 import csv
-import IPython.display as ipd
 import midi2audio
 import glob
 import tensorflow as tf
 import tensorflow_probability as tfp
-import datetime
 import functools
+from collections import OrderedDict
 
 TOTAL_MEASURES = 240  # 学習用MusicXMLを読み込む際の小節数の上限
-UNIT_MEASURES = 4  # 1回の生成で扱う旋律の長さ
+UNIT_MEASURES = 2  # 1回の生成で扱う旋律の長さ
 BEAT_RESO = 4  # 1拍を何個に分割するか(4の場合は16分音符単位)
 N_BEATS = 4  # 1小節の拍数(今回は4/4なので常に4)
 NOTENUM_FROM = 36  # 扱う音域の下限(この値を含む)
@@ -22,11 +21,25 @@ MELODY_LENGTH = 8  # 生成するメロディの長さ(小節数)
 
 # ディレクトリ定義
 BASE_DIR = "./"
-MUS_DIR = BASE_DIR + "omnibook/"
+MUS_DIR = BASE_DIR + "musicxml/"
+MODEL_DIR = BASE_DIR + "model/"
 
 # VAEモデル関連
 ENCODED_DIM = 32  # 潜在空間の次元数
 LSTM_DIM = 1024  # LSTM層のノード数
+
+# 2023.08.04 追加
+TICKS_PER_BEAT = 480  # 四分音符を何ticksに分割するか
+MELODY_PROG_CHG = 73  # メロディの音色（プログラムチェンジ）
+MELODY_CH = 0  # メロディのチャンネル
+
+# CHORDS_TABLE
+CHORDS_TABLE = OrderedDict({
+    'seventh': '7',
+    'major': 'M',
+    'minor': 'm',
+    '-': ''
+})
 
 
 # エンコーダを構築
@@ -71,8 +84,11 @@ def make_model(seq_length, input_dim, output_dim):
     encoder = make_encoder(make_prior(), seq_length, input_dim)
     decoder = make_decoder(seq_length, output_dim)
     vae = tf.keras.Model(encoder.inputs, decoder(encoder.outputs))
-    vae.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
-                loss="categorical_crossentropy", metrics="categorical_accuracy")
+    vae.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+        loss="categorical_crossentropy",
+        metrics="categorical_accuracy"
+    )
     return vae
 
 
@@ -82,6 +98,7 @@ def make_note_and_chord_seq_from_musicxml(score):
     note_seq = [None] * (TOTAL_MEASURES * N_BEATS * BEAT_RESO)
     chord_seq = [None] * (TOTAL_MEASURES * N_BEATS * BEAT_RESO)
     for element in score.parts[0].elements:
+        print(element)
         if isinstance(element, music21.stream.Measure):
             measure_offset = element.offset
             for note in element.notes:
@@ -117,10 +134,20 @@ def add_rest_nodes(onehot_seq):
     return np.concatenate([onehot_seq, rest], axis=1)
 
 
-# 指定された仕様のcsvファイルを読み込んで
-# ChordSymbol列を返す
+# 指定された仕様のcsvファイルを読み込んでChordSymbol列を返す（4拍子区切りのコード配列一覧）
+# ８小節の場合、32個のコード配列を返す。
+#     0,0,F,major-seventh,F
+#     0,2,F,major-seventh,F
+#     1,0,F,major-seventh,F
+#     1,2,F,major-seventh,F
+#     2,0,E,minor-seventh,E
+#     2,2,E,minor-seventh,E
+#     3,0,E,minor-seventh,E
+#     (小説番号),(拍番号),(ルート音),(コード種類),(ベース音)
 def read_chord_file(file, appending=0):
+    # 拍数分の配列を作成 appdeningは後ろに追加する小節数
     chord_seq = [None] * ((MELODY_LENGTH + appending) * N_BEATS)
+
     with open(file) as f:
         reader = csv.reader(f)
         for row in reader:
@@ -130,36 +157,62 @@ def read_chord_file(file, appending=0):
                 smbl = music21.harmony.ChordSymbol(root=row[2], kind=row[3], bass=row[4])
                 assign_idx = m * 4 + b
                 chord_seq[assign_idx] = smbl
+
     for i in range(len(chord_seq)):
         if chord_seq[i] is not None:
             chord = chord_seq[i]
         else:
             chord_seq[i] = chord
+
+    print(chord_seq)
     return chord_seq
 
 
+# magenta向けにコードの一覧を文字列で表示
+def parse_chord_for_magenta(chord_prog: []) -> str:
+    chords_str = '"'
+    chord_flatten = map(lambda x: x.figure, chord_prog)
+    chords_str += ' '.join(chord_flatten) + '"'
+    return chords_str
+
+
 # コード進行からChordSymbol列を生成
-# divisionは1小節に何個コードを入れるか
+# divisionでさらに解像度をあげる。
+# 1:  4分音符単位
+# 2:  8分音符単位
+# 4: 16分音符単位
+# 8: 32分音符単位
 def make_chord_seq(chord_prog, division):
     T = int(N_BEATS * BEAT_RESO / division)
     seq = [None] * (T * len(chord_prog))
+    print(T * len(chord_prog))
     for i in range(len(chord_prog)):
         for t in range(T):
             if isinstance(chord_prog[i], music21.harmony.ChordSymbol):
                 seq[i * T + t] = chord_prog[i]
             else:
                 seq[i * T + t] = music21.harmony.ChordSymbol(chord_prog[i])
+
+    # print(seq)
     return seq
 
 
 # ChordSymbol列をmany-hot (chroma) vector列に変換
 def chord_seq_to_chroma(chord_seq):
     N = len(chord_seq)
-    matrix = np.zeros((N, 12))
+    matrix = np.zeros((N, 24))
     for i in range(N):
         if chord_seq[i] is not None:
+            transpose = 0
             for note in chord_seq[i]._notes:
-                matrix[i, note.pitch.midi % 12] = 1
+                print(str(note.pitch) + ":" + str(note.pitch.midi))
+                # C3(48)以下の場合は1オクターブ分底上げする
+                if (note.pitch.midi < 48):
+                    transpose = 12
+                elif (note.pitch.midi >= 72):
+                    transpose = -12  # 分数コードは超えるので1オクターブ下げる
+                matrix[i, (note.pitch.midi + transpose) % 24] = 1
+            print(matrix[i])
     return matrix
 
 
@@ -175,6 +228,7 @@ def calc_notenums_from_pianoroll(pianoroll):
         n = np.argmax(pianoroll[i, :])
         nn = -1 if n == pianoroll.shape[1] - 1 else n + NOTENUM_FROM
         notenums.append(nn)
+    print("notenums:" + str(notenums))
     return notenums
 
 
@@ -237,12 +291,10 @@ def plot_pianoroll(pianoroll):
 
 
 # WAVを生成
-def generate_wav_file(model_idf, dst_filename):
+def generate_wav_file(dst_filename, wav_filename):
     sf_path = "soundfonts/FluidR3_GM.sf2"
     fs = midi2audio.FluidSynth(sound_font=sf_path)
-    timestamp = format(datetime.datetime.now(), '%Y-%m-%d_%H-%M-%S')
-    generated_filename = "%s_%s_output.wav" % (timestamp, model_idf)
-    fs.midi_to_audio(dst_filename, generated_filename)
+    fs.midi_to_audio(dst_filename, wav_filename)
 
 
 # メロディを表すone-hotベクトル、コードを表すmany-hotベクトルの系列に対して、
@@ -250,11 +302,15 @@ def generate_wav_file(model_idf, dst_filename):
 def extract_seq(i, onehot_seq, chroma_seq):
     o = onehot_seq[i * N_BEATS * BEAT_RESO: (i + UNIT_MEASURES) * N_BEATS * BEAT_RESO, :]
     c = chroma_seq[i * N_BEATS * BEAT_RESO: (i + UNIT_MEASURES) * N_BEATS * BEAT_RESO, :]
+
+    print("extract_seq i:" + str(i) + " count-o:" + str(len(o)) + '|count-c:' + str(len(c)))
+    for i in range(len(c)):
+        print("chroma_seq: %s: %s" % (i, c[i]))
     return o, c
 
 
 # メロディを表すone-hotベクトル、コードを表すmany-hotベクトルの系列から、
-# モデルの入力、出力用のデータい整えて返す
+# モデルの入力、出力用のデータを連結して返す
 def calc_xy(o, c):
     x = np.concatenate([o, c], axis=1)
     y = o
@@ -274,17 +330,84 @@ def divide_seq(onehot_seq, chroma_seq, x_all, y_all):
 
 # ファイルの読み込み
 def read_mus_xml_files(x, y, key_root, key_mode):
-    for f in glob.glob(MUS_DIR + "/*.xml"):
-        print(f)
+    # musicxml を読み込み
+    for f in glob.glob(MUS_DIR + "%s_%s" % (key_root, key_mode) + "/*.musicxml"):
+        # musicxml を読み込み
         score = music21.converter.parse(f)
+        # 調を取得（ただし複数ありうる）
         key = score.analyze("key")
-        if key.mode == key_mode:
-            inter = music21.interval.Interval(key.tonic, music21.pitch.Pitch(key_root))
-            score = score.transpose(inter)
-            note_seq, chord_seq = make_note_and_chord_seq_from_musicxml(score)
-            main_onehot_seq = add_rest_nodes(note_seq_to_onehot(note_seq))
-            main_chroma_seq = chord_seq_to_chroma(chord_seq)
-            divide_seq(main_onehot_seq, main_chroma_seq, x, y)
+        print(f + " key: " + key.tonic.name + " " + key.mode)
+        print(key.alternateInterpretations)
+        inter = music21.interval.Interval(key.tonic, music21.pitch.Pitch(key_root))
+        score = score.transpose(inter)
+        note_seq, chord_seq = make_note_and_chord_seq_from_musicxml(score)
+        main_onehot_seq = add_rest_nodes(note_seq_to_onehot(note_seq))
+        main_chroma_seq = chord_seq_to_chroma(chord_seq)
+        divide_seq(main_onehot_seq, main_chroma_seq, x, y)
     x_all = np.array(x)
     y_all = np.array(y)
     return x_all, y_all
+
+
+# 2023.08.04 追加
+# プログラムチェンジを指定したものに差し替え
+def replace_prog_chg(midi):
+    for track in midi.tracks:
+        for msg in track:
+            if msg.type == 'program_change' and msg.channel == MELODY_CH:
+                msg.program = MELODY_PROG_CHG
+
+
+def make_base_midi():
+    midi = mido.MidiFile(type=1)
+    midi.ticks_per_beat = TICKS_PER_BEAT
+    return midi
+
+
+def make_melody_midi(note_nums, durations, midi, transpose, ticks_per_beat=TICKS_PER_BEAT):
+    midi.tracks.append(make_midi_track(note_nums, durations, transpose, ticks_per_beat))
+    return midi
+
+
+# MIDIファイル（提出用、伴奏なし）を生成
+def make_midi_for_submission(midi, dst_filename):
+    midi.save(dst_filename)
+
+
+# MIDIファイル（チェック用、伴奏あり）を生成
+def make_midi_and_wav_for_check(midi, output_file, wav_output_file):
+    midi.save(output_file)
+    # WAVファイルを生成
+    generate_wav_file(output_file, wav_output_file)
+
+
+# MIDIトラックを生成（make_midiから呼び出される）
+def make_midi_track(note_nums, durations, transpose, ticks_per_beat):
+    track = mido.MidiTrack()
+    track.append(mido.Message('program_change', program=MELODY_PROG_CHG, time=0))
+    init_tick = INTRO_BLANK_MEASURES * N_BEATS * ticks_per_beat
+    prev_tick = 0
+    for i in range(len(note_nums)):
+        if note_nums[i] > 0:
+            curr_tick = int(i * ticks_per_beat / BEAT_RESO) + init_tick
+            track.append(
+                mido.Message(
+                    'note_on',
+                    note=note_nums[i] + transpose,
+                    velocity=100,
+                    time=curr_tick - prev_tick
+                )
+            )
+            prev_tick = curr_tick
+            curr_tick = int((i + durations[i]) * ticks_per_beat / BEAT_RESO) + init_tick
+            track.append(
+                mido.Message(
+                    'note_off',
+                    note=note_nums[i] + transpose,
+                    velocity=100,
+                    time=curr_tick - prev_tick
+                )
+            )
+            prev_tick = curr_tick
+    return track
+
