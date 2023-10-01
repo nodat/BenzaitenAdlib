@@ -5,24 +5,15 @@ based on https://docs.google.com/document/d/1CizJ6b9i2yZ9OIDPrBWUROyJahlZrlqe-na
 
 ## How to setup
 
-1. Set up Python and TensorFlow for the M1Mac environment.
-   * see https://developer.apple.com/metal/tensorflow-plugin/ 
+1. Set up Python and TensorFlow for the Windows environment.
+   * see https://www.kkaneko.jp/tools/win/tensorflow2.html
 1. Install each module.   
    * Since the following import statements appear in the program, please install the respective modules so that these can be resolved:
-   ```python
-    import music21
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import mido
-    import csv
-    import IPython.display as ipd
-    import midi2audio
-    import glob
-    import tensorflow as tf
-    import tensorflow_probability as tfp
+   ```
+   pip install -r requirements.txt
    ```
 
-1. Download the training musicXML from https://homepages.loria.fr/evincent/omnibook/ and place it in the `omnibook` directory.
+1. Download the training musicXML from https://homepages.loria.fr/evincent/omnibook/ and place it in the `musicxml/C_major` or `musicxml/A_minor` directory.
 
 1. Download the following sample file from the [here](https://drive.google.com/drive/folders/1jZSMX14B-i98x06QowaNL_9VGXeJZJbd) and place it in the `sample` directory. 
 1. Rename sample files as follows:
