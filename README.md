@@ -1,5 +1,5 @@
 # BenzaitenAdlib
-Benzaiten Adlib TensorFlow version Sample for M1 Mac
+Benzaiten Adlib TensorFlow version Sample for Windows
 
 based on https://docs.google.com/document/d/1CizJ6b9i2yZ9OIDPrBWUROyJahlZrlqe-naxh4brACQ/edit
 

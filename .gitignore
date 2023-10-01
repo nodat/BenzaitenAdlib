@@ -1,10 +1,2 @@
 .idea
 venv
-./model/
-./musicxml/
-./pip-library/
-./output/
-./output-wav/
-./output-melody/
-./sample/
-./soundfonts/
